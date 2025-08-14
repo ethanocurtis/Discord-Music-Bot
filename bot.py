@@ -804,9 +804,6 @@ class MusicBot(commands.Bot):
                 return
             await interaction.response.send_message(f"🔁 Loop set to **{state.loop_mode.name}**.")
 
-        loop_cmd.__annotations__['mode'] = app_commands.Choice[str]  # type: ignore
-        loop_cmd.autocomplete = None  # silence pylance
-
         @loop_cmd.autocomplete  # type: ignore
         async def loop_autocomplete(interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:  # type: ignore
             choices = ["off", "track", "queue"]
