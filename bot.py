@@ -33,6 +33,7 @@ except Exception:
 # ---- Config via ENV ----
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 DEV_GUILDS = [int(x) for x in os.getenv("DEV_GUILDS", "").split(",") if x.strip().isdigit()]
+DECORATOR_GUILDS = [discord.Object(id=g) for g in DEV_GUILDS]
 OWNER_IDS = {int(x) for x in os.getenv("OWNER_IDS", "").split(",") if x.strip().isdigit()}
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 IDLE_DISCONNECT_MINUTES = int(os.getenv("IDLE_DISCONNECT_MINUTES", "5"))
@@ -630,7 +631,7 @@ class MusicBot(commands.Bot):
 
     # ---------- Command Registration ----------
     def _register_commands(self) -> None:
-        @self.tree.command(name="play", description="Play a YouTube/SoundCloud/HTTP URL or search query.", guilds=[discord.Object(id=g) for g in DEV_GUILDS] if DEV_GUILDS else None)
+        @self.tree.command(name="play", description="Play a YouTube/SoundCloud/HTTP URL or search query.", guilds=DECORATOR_GUILDS)
         @app_commands.describe(query_or_url="YouTube URL or search terms")
         async def play(interaction: discord.Interaction, query_or_url: str) -> None:
             await interaction.response.defer(thinking=True)
@@ -660,7 +661,7 @@ class MusicBot(commands.Bot):
                         return
                     state.player_task = asyncio.create_task(self.player_loop(interaction.guild.id, interaction.channel))
 
-        @self.tree.command(name="pause", description="Pause playback.", guilds=[discord.Object(id=g) for g in DEV_GUILDS] if DEV_GUILDS else None)
+        @self.tree.command(name="pause", description="Pause playback.", guilds=DECORATOR_GUILDS)
         async def pause(interaction: discord.Interaction) -> None:
             await self.check_same_channel(interaction)
             state = self.get_state(interaction.guild.id)  # type: ignore
@@ -670,7 +671,7 @@ class MusicBot(commands.Bot):
             else:
                 await interaction.response.send_message("Nothing is playing.", ephemeral=True)
 
-        @self.tree.command(name="resume", description="Resume playback.", guilds=[discord.Object(id=g) for g in DEV_GUILDS] if DEV_GUILDS else None)
+        @self.tree.command(name="resume", description="Resume playback.", guilds=DECORATOR_GUILDS)
         async def resume(interaction: discord.Interaction) -> None:
             await self.check_same_channel(interaction)
             state = self.get_state(interaction.guild.id)  # type: ignore
@@ -680,7 +681,7 @@ class MusicBot(commands.Bot):
             else:
                 await interaction.response.send_message("Nothing is paused.", ephemeral=True)
 
-        @self.tree.command(name="skip", description="Skip the current track.", guilds=[discord.Object(id=g) for g in DEV_GUILDS] if DEV_GUILDS else None)
+        @self.tree.command(name="skip", description="Skip the current track.", guilds=DECORATOR_GUILDS)
         async def skip(interaction: discord.Interaction) -> None:
             await self.check_same_channel(interaction)
             state = self.get_state(interaction.guild.id)  # type: ignore
@@ -690,13 +691,13 @@ class MusicBot(commands.Bot):
             else:
                 await interaction.response.send_message("Nothing is playing.", ephemeral=True)
 
-        @self.tree.command(name="stop", description="Stop playback and clear the queue.", guilds=[discord.Object(id=g) for g in DEV_GUILDS] if DEV_GUILDS else None)
+        @self.tree.command(name="stop", description="Stop playback and clear the queue.", guilds=DECORATOR_GUILDS)
         async def stop(interaction: discord.Interaction) -> None:
             await self.check_same_channel(interaction)
             await self.stop_playback(interaction.guild.id)  # type: ignore
             await interaction.response.send_message("⏹️ Stopped and cleared the queue.")
 
-        @self.tree.command(name="queue", description="Show the queue.", guilds=[discord.Object(id=g) for g in DEV_GUILDS] if DEV_GUILDS else None)
+        @self.tree.command(name="queue", description="Show the queue.", guilds=DECORATOR_GUILDS)
         async def queue(interaction: discord.Interaction) -> None:
             state = self.get_state(interaction.guild.id)  # type: ignore
             if not state.queue:
@@ -710,7 +711,7 @@ class MusicBot(commands.Bot):
                 embed.set_footer(text=f"And {len(lines)-20} more...")
             await interaction.response.send_message(embed=embed)
 
-        @self.tree.command(name="np", description="Show the currently playing track.", guilds=[discord.Object(id=g) for g in DEV_GUILDS] if DEV_GUILDS else None)
+        @self.tree.command(name="np", description="Show the currently playing track.", guilds=DECORATOR_GUILDS)
         async def np(interaction: discord.Interaction) -> None:
             embed = self.build_now_playing_embed(interaction.guild.id)  # type: ignore
             if not embed:
@@ -718,7 +719,7 @@ class MusicBot(commands.Bot):
                 return
             await interaction.response.send_message(embed=embed)
 
-        @self.tree.command(name="volume", description="Set volume (0-200%).", guilds=[discord.Object(id=g) for g in DEV_GUILDS] if DEV_GUILDS else None)
+        @self.tree.command(name="volume", description="Set volume (0-200%).", guilds=DECORATOR_GUILDS)
         @app_commands.describe(percent="Volume percent (0-200)")
         async def volume(interaction: discord.Interaction, percent: app_commands.Range[int, VOLUME_MIN, VOLUME_MAX]) -> None:
             await self.check_same_channel(interaction)
@@ -728,7 +729,7 @@ class MusicBot(commands.Bot):
                 await self._restart_with_new_volume(interaction.guild.id, interaction.channel)  # type: ignore
             await interaction.response.send_message(f"🔊 Volume set to **{percent}%**.")
 
-        @self.tree.command(name="clear", description="Clear the queue.", guilds=[discord.Object(id=g) for g in DEV_GUILDS] if DEV_GUILDS else None)
+        @self.tree.command(name="clear", description="Clear the queue.", guilds=DECORATOR_GUILDS)
         async def clear(interaction: discord.Interaction) -> None:
             await self.check_same_channel(interaction)
             state = self.get_state(interaction.guild.id)  # type: ignore
@@ -736,7 +737,7 @@ class MusicBot(commands.Bot):
             state.queue.clear()
             await interaction.response.send_message(f"🧹 Cleared {n} tracks from the queue.")
 
-        @self.tree.command(name="shuffle", description="Shuffle the queue.", guilds=[discord.Object(id=g) for g in DEV_GUILDS] if DEV_GUILDS else None)
+        @self.tree.command(name="shuffle", description="Shuffle the queue.", guilds=DECORATOR_GUILDS)
         async def shuffle(interaction: discord.Interaction) -> None:
             await self.check_same_channel(interaction)
             import random
@@ -744,7 +745,7 @@ class MusicBot(commands.Bot):
             random.shuffle(state.queue)
             await interaction.response.send_message("🔀 Shuffled the queue.")
 
-        @self.tree.command(name="remove", description="Remove a track at index.", guilds=[discord.Object(id=g) for g in DEV_GUILDS] if DEV_GUILDS else None)
+        @self.tree.command(name="remove", description="Remove a track at index.", guilds=DECORATOR_GUILDS)
         @app_commands.describe(index="1-based index in the queue")
         async def remove(interaction: discord.Interaction, index: app_commands.Range[int, 1, 10_000]) -> None:
             await self.check_same_channel(interaction)
@@ -755,7 +756,7 @@ class MusicBot(commands.Bot):
             t = state.queue.pop(index - 1)
             await interaction.response.send_message(f"Removed **{t.title}** from the queue.")
 
-        @self.tree.command(name="move", description="Move a track in the queue.", guilds=[discord.Object(id=g) for g in DEV_GUILDS] if DEV_GUILDS else None)
+        @self.tree.command(name="move", description="Move a track in the queue.", guilds=DECORATOR_GUILDS)
         @app_commands.describe(from_index="From index (1-based)", to_index="To index (1-based)")
         async def move(interaction: discord.Interaction, from_index: int, to_index: int) -> None:
             await self.check_same_channel(interaction)
@@ -768,7 +769,7 @@ class MusicBot(commands.Bot):
             state.queue.insert(to_index - 1, item)
             await interaction.response.send_message(f"Moved **{item.title}** to position {to_index}.")
 
-        @self.tree.command(name="seek", description="Seek within the current track (mm:ss).", guilds=[discord.Object(id=g) for g in DEV_GUILDS] if DEV_GUILDS else None)
+        @self.tree.command(name="seek", description="Seek within the current track (mm:ss).", guilds=DECORATOR_GUILDS)
         @app_commands.describe(timestamp="Format mm:ss (or h:mm:ss)")
         async def seek(interaction: discord.Interaction, timestamp: str) -> None:
             await self.check_same_channel(interaction)
@@ -786,7 +787,7 @@ class MusicBot(commands.Bot):
             else:
                 await interaction.response.send_message("Cannot determine text channel to update.", ephemeral=True)
 
-        @self.tree.command(name="loop", description="Set loop mode: off, track, queue.", guilds=[discord.Object(id=g) for g in DEV_GUILDS] if DEV_GUILDS else None)
+        @self.tree.command(name="loop", description="Set loop mode: off, track, queue.", guilds=DECORATOR_GUILDS)
         @app_commands.describe(mode="off | track | queue")
         async def loop_cmd(interaction: discord.Interaction, mode: app_commands.Choice[str]) -> None:
             await self.check_same_channel(interaction)
@@ -812,7 +813,7 @@ class MusicBot(commands.Bot):
             return [app_commands.Choice(name=c, value=c) for c in choices if c.startswith(current.lower())]
 
         # ---- Extras ----
-        @self.tree.command(name="remove_dupes", description="Remove duplicate URLs from the queue.", guilds=[discord.Object(id=g) for g in DEV_GUILDS] if DEV_GUILDS else None)
+        @self.tree.command(name="remove_dupes", description="Remove duplicate URLs from the queue.", guilds=DECORATOR_GUILDS)
         async def remove_dupes(interaction: discord.Interaction) -> None:
             await self.check_same_channel(interaction)
             state = self.get_state(interaction.guild.id)  # type: ignore
@@ -829,7 +830,7 @@ class MusicBot(commands.Bot):
             state.queue = newq
             await interaction.response.send_message(f"Removed {removed} duplicates.")
 
-        @self.tree.command(name="jump", description="Jump to a queue index and start playing it.", guilds=[discord.Object(id=g) for g in DEV_GUILDS] if DEV_GUILDS else None)
+        @self.tree.command(name="jump", description="Jump to a queue index and start playing it.", guilds=DECORATOR_GUILDS)
         async def jump(interaction: discord.Interaction, index: int) -> None:
             await self.check_same_channel(interaction)
             state = self.get_state(interaction.guild.id)  # type: ignore
