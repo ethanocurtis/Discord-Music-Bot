@@ -396,7 +396,6 @@ class MusicBot(commands.Bot):
             )
             src = discord.PCMVolumeTransformer(src, volume=state.volume / 100.0)
             setattr(src, "_start_ts", time.monotonic())
-,
                 options=" ".join(["-filter:a", f"volume={state.volume/100:.2f}"]),
             )
             # Annotate start time
