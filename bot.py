@@ -164,25 +164,34 @@ class MusicBot(commands.Bot):
         return self.guild_states[guild_id]
 
     async def ensure_voice(self, interaction: discord.Interaction) -> discord.VoiceClient:
-        assert interaction.guild and interaction.user
+    assert interaction.guild and interaction.user
 
-        state = self.get_state(interaction.guild.id)
+    state = self.get_state(interaction.guild.id)
 
-        # User must be in a voice channel
-        if not isinstance(interaction.user, discord.Member) or not interaction.user.voice or not interaction.user.voice.channel:
-            raise commands.CommandError("You must be connected to a voice channel to use this command.")
+    # User must be in a voice channel
+    if not isinstance(interaction.user, discord.Member) or not interaction.user.voice or not interaction.user.voice.channel:
+        raise commands.CommandError("You must be connected to a voice channel to use this command.")
 
-        # If bot already connected elsewhere in this guild, must match
-        if state.voice and state.voice.channel and state.voice.channel != interaction.user.voice.channel:
-            # Move to user's channel
-            await state.voice.move_to(interaction.user.voice.channel)
-            return state.voice
+    target = interaction.user.voice.channel
 
-        if not state.voice or not state.voice.is_connected():
-            voice = await interaction.user.voice.channel.connect(self_deaf=True)
-            state.voice = voice
-            log.info(f"Connected to voice in guild {interaction.guild.id} #{interaction.user.voice.channel.id}")
-        return state.voice  # type: ignore
+    # Move if connected elsewhere
+    if state.voice and state.voice.channel and state.voice.channel != target:
+        await state.voice.move_to(target)
+    elif not state.voice or not state.voice.is_connected():
+        state.voice = await target.connect(self_deaf=True)
+
+    # Wait up to 10s for stable connect
+    for _ in range(20):
+        if state.voice and state.voice.is_connected():
+            break
+        await asyncio.sleep(0.5)
+
+    if not state.voice or not state.voice.is_connected():
+        raise commands.CommandError("Failed to connect to voice. Please try again.")
+
+    # Small grace to let UDP session settle
+    await asyncio.sleep(0.3)
+    return state.voice  # type: ignore
 
     async def check_same_channel(self, interaction: discord.Interaction) -> None:
         # Skip for owners
@@ -402,6 +411,7 @@ class MusicBot(commands.Bot):
                 state.voice.stop()
 
             state.stop_event.clear()
+            await asyncio.sleep(0.2)
             state.voice.play(src, after=lambda e: state.stop_event.set())
             log.info(f"[{guild_id}] Now playing: {track.title} ({track.url})")
 
@@ -517,6 +527,28 @@ class MusicBot(commands.Bot):
     async def on_ready(self) -> None:
         log.info(f"Logged in as {self.user} (ID: {self.user and self.user.id})")
         await self.change_presence(activity=discord.Game(name="music • /play"))
+
+    
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState) -> None:
+        # If bot got disconnected from VC unexpectedly but we still have a queue/track, try to reconnect
+        if self.user and member.id == self.user.id:
+            guild = member.guild
+            state = self.guild_states.get(guild.id)
+            if not state:
+                return
+            # If we lost the voice connection
+            if before.channel and not after.channel:
+                if state.queue or state.now_playing:
+                    # Try to reconnect to the last known channel if possible
+                    try:
+                        # Prefer user's current channel if requester still there; fallback to before.channel
+                        target = before.channel
+                        if target:
+                            state.voice = await target.connect(self_deaf=True)
+                            await asyncio.sleep(0.5)
+                    except Exception:
+                        pass
+    
 
     async def on_guild_remove(self, guild: discord.Guild) -> None:
         # Cleanup state
