@@ -156,8 +156,6 @@ class MusicBot(commands.Bot):
         self._embed_edit_ts: Dict[int, float] = {}
 
         # Health tick
-        self.healthbeat.start()
-
     # ---------- Helpers ----------
 
     def get_state(self, guild_id: int) -> GuildState:
@@ -501,6 +499,8 @@ class MusicBot(commands.Bot):
     async def setup_hook(self) -> None:
         # Register commands
         self._register_commands()
+        # Start background health task now that loop is running
+        self.healthbeat.start()
         # Sync behavior: guild for dev, else global
         if DEV_GUILDS:
             for gid in DEV_GUILDS:
