@@ -164,35 +164,26 @@ class MusicBot(commands.Bot):
         return self.guild_states[guild_id]
 
     async def ensure_voice(self, interaction: discord.Interaction) -> discord.VoiceClient:
-    assert interaction.guild and interaction.user
-
-    state = self.get_state(interaction.guild.id)
-
-    # User must be in a voice channel
-    if not isinstance(interaction.user, discord.Member) or not interaction.user.voice or not interaction.user.voice.channel:
-        raise commands.CommandError("You must be connected to a voice channel to use this command.")
-
-    target = interaction.user.voice.channel
-
-    # Move if connected elsewhere
-    if state.voice and state.voice.channel and state.voice.channel != target:
-        await state.voice.move_to(target)
-    elif not state.voice or not state.voice.is_connected():
-        state.voice = await target.connect(self_deaf=True)
-
-    # Wait up to 10s for stable connect
-    for _ in range(20):
-        if state.voice and state.voice.is_connected():
-            break
-        await asyncio.sleep(0.5)
-
-    if not state.voice or not state.voice.is_connected():
-        raise commands.CommandError("Failed to connect to voice. Please try again.")
-
-    # Small grace to let UDP session settle
-    await asyncio.sleep(0.3)
-    return state.voice  # type: ignore
-
+        # Validate context
+        assert interaction.guild and interaction.user
+        state = self.get_state(interaction.guild.id)
+        
+        # User must be in a voice channel
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.voice or not interaction.user.voice.channel:
+            raise app_commands.CheckFailure("You must be in a voice channel to use this command.")
+        
+        channel = interaction.user.voice.channel
+        vc = state.voice
+        
+        # Reuse or move existing connection when possible
+        if vc and vc.is_connected():
+            if vc.channel != channel:
+                await vc.move_to(channel)
+        else:
+            vc = await channel.connect(self_deaf=True)
+        
+        state.voice = vc
+        return vc
     async def check_same_channel(self, interaction: discord.Interaction) -> None:
         # Skip for owners
         if interaction.user and interaction.user.id in OWNER_IDS:
