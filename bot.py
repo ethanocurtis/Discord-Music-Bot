@@ -318,7 +318,7 @@ class MusicBot(commands.Bot):
 
     # ---------- Playback ----------
 
-    async def player_loop(self, guild_id: int, channel) -> None  # type: ignore:
+    async def player_loop(self, guild_id: int, channel) -> None:  # type: ignore
         """Playback loop per guild; runs inside a task."""
         state = self.get_state(guild_id)
         log.info(f"[{guild_id}] Player loop started")
