@@ -843,7 +843,6 @@ class MusicBot(commands.Bot):
             await interaction.response.send_message(f"Jumped to **{chosen.title}**.")  # type: ignore
 
         # Volume choices for autocomplete/nice UX
-        volume.__annotations__['percent'] = int  # type: ignore
 
     # ---------- Error handling ----------
     async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
