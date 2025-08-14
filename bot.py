@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 from dataclasses import dataclass, field
 import enum
 import logging
@@ -17,7 +16,7 @@ import re
 import signal
 import sys
 import time
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any
 
 import discord
 from discord import app_commands
@@ -66,7 +65,7 @@ except Exception:
     ]
 
 YDL_OPTS_BASE: Dict[str, Any] = {
-    "format": "bestaudio/best",
+    "format": "bestaudio[acodec=opus]/bestaudio/best",
     "noplaylist": False,  # allow playlist if explicit URL; we detect & disable for search
     "quiet": True,
     "skip_download": True,
@@ -151,12 +150,12 @@ class MusicBot(commands.Bot):
             intents=intents,
             application_id=None,
         )
+        # Use the built-in CommandTree (self.tree) — do not replace it.
         self.guild_states: Dict[int, GuildState] = {}
 
         # Debounce map for NP embed edits: guild_id -> last_edit_ts
         self._embed_edit_ts: Dict[int, float] = {}
 
-        # Health tick
     # ---------- Helpers ----------
 
     def get_state(self, guild_id: int) -> GuildState:
@@ -180,7 +179,7 @@ class MusicBot(commands.Bot):
             return state.voice
 
         if not state.voice or not state.voice.is_connected():
-            voice = await interaction.user.voice.channel.connect(cls=discord.VoiceClient, self_deaf=True)
+            voice = await interaction.user.voice.channel.connect(self_deaf=True)
             state.voice = voice
             log.info(f"Connected to voice in guild {interaction.guild.id} #{interaction.user.voice.channel.id}")
         return state.voice  # type: ignore
@@ -309,8 +308,6 @@ class MusicBot(commands.Bot):
     def _current_position_seconds(self, state: GuildState) -> int:
         if not state.voice or not state.voice.is_playing():
             return 0
-        # discord.py VoiceClient doesn't expose precise position; we approximate since start.
-        # We store start time on the AudioSource wrapper.
         src = getattr(state.voice.source, "_start_ts", None)
         if src is None:
             return 0
@@ -374,7 +371,8 @@ class MusicBot(commands.Bot):
         finally:
             # cleanup
             async with state.lock:
-                state.progress_task and state.progress_task.cancel()
+                if state.progress_task:
+                    state.progress_task.cancel()
                 if state.voice and state.voice.is_playing():
                     state.voice.stop()
                 state.player_task = None
@@ -386,45 +384,43 @@ class MusicBot(commands.Bot):
         if not track:
             return False
         if not state.voice or not state.voice.is_connected():
-            # Try to reconnect to last channel of NP message if available (best-effort)
             log.warning(f"[{guild_id}] No voice connected; cannot play")
             return False
 
-        # Build FFmpeg source
-        volume_filter = f"volume={state.volume/100:.2f}"
-        ffmpeg_options = FFMPEG_BASE_OPTS + ["-filter:a", volume_filter, "-ss", "0"]
+        try:
+            # Use Opus if possible (Discord prefers Opus)
+            src = discord.FFmpegOpusAudio(
+                source=track.stream_url,
+                before_options=" ".join(FFMPEG_BASE_OPTS),
+                options=" ".join(["-filter:a", f"volume={state.volume/100:.2f}"]),
+            )
+            # Annotate start time
+            setattr(src, "_start_ts", time.monotonic())
 
-        # Use Opus if possible (Discord prefers Opus)
-        src = discord.FFmpegOpusAudio(
-            source=track.stream_url,
-            before_options=" ".join(FFMPEG_BASE_OPTS),
-            options=" ".join(["-filter:a", volume_filter]),
-        )
-        # Annotate start time
-        setattr(src, "_start_ts", time.monotonic())
+            # Stop existing first
+            if state.voice.is_playing() or state.voice.is_paused():
+                state.voice.stop()
 
-        # Start playing
-        def _after(err: Optional[Exception]) -> None:
-            if err:
-                log.error(f"[{guild_id}] Player error: {err}")
-            state.stop_event.set()
+            state.stop_event.clear()
+            state.voice.play(src, after=lambda e: state.stop_event.set())
+            log.info(f"[{guild_id}] Now playing: {track.title} ({track.url})")
 
-        # Stop existing first
-        if state.voice.is_playing() or state.voice.is_paused():
-            state.voice.stop()
+            # Send/update NP embed (and set reactions once)
+            await self._post_or_update_np(guild_id, channel, force_new=False)
 
-        state.stop_event.clear()
-        state.voice.play(src, after=_after)
-        log.info(f"[{guild_id}] Now playing: {track.title} ({track.url})")
-
-        # Send/update NP embed (and set reactions once)
-        await self._post_or_update_np(guild_id, channel, force_new=False)
-
-        # Start a progress updater task
-        if state.progress_task:
-            state.progress_task.cancel()
-        state.progress_task = asyncio.create_task(self._progress_updater(guild_id, channel))
-        return True
+            # Start a progress updater task
+            if state.progress_task:
+                state.progress_task.cancel()
+            state.progress_task = asyncio.create_task(self._progress_updater(guild_id, channel))
+            return True
+        except Exception as e:
+            log.exception(f"[{guild_id}] Failed to start FFmpeg/Opus: {e}")
+            try:
+                if hasattr(channel, "send"):
+                    await channel.send(f"⚠️ Failed to start audio for **{track.title}**. Trying the next track.")
+            except Exception:
+                pass
+            return False
 
     async def _wait_playback_finish(self, guild_id: int) -> None:
         state = self.get_state(guild_id)
@@ -445,7 +441,7 @@ class MusicBot(commands.Bot):
             return
 
         try:
-            if state.last_np_message_id and state.last_np_channel_id == channel.id and not force_new:
+            if state.last_np_message_id and state.last_np_channel_id and getattr(channel, "id", None) == state.last_np_channel_id and not force_new:
                 # Edit existing with debounce
                 if self._can_edit_embed(guild_id):
                     msg = await channel.fetch_message(state.last_np_message_id)
@@ -457,7 +453,7 @@ class MusicBot(commands.Bot):
 
         msg = await channel.send(embed=embed)
         state.last_np_message_id = msg.id
-        state.last_np_channel_id = channel.id
+        state.last_np_channel_id = getattr(channel, "id", None)
         # Attach control reactions once
         for emoji in ["⏯", "⏭", "⏹", "🔁", "🔀", "🔉", "🔊", "⏮"]:
             try:
@@ -483,8 +479,9 @@ class MusicBot(commands.Bot):
             if state.voice and (state.voice.is_playing() or state.voice.is_paused()):
                 state.voice.stop()
             state.now_playing = None
-            state.progress_task and state.progress_task.cancel()
-            state.progress_task = None
+            if state.progress_task:
+                state.progress_task.cancel()
+                state.progress_task = None
 
     # ---------- Command Checks ----------
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -528,7 +525,7 @@ class MusicBot(commands.Bot):
             await state.voice.disconnect(force=False)
 
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
-        if payload.user_id == self.user.id if self.user else False:
+        if self.user and payload.user_id == self.user.id:
             return  # ignore self
         guild_id = payload.guild_id
         if not guild_id:
@@ -545,7 +542,7 @@ class MusicBot(commands.Bot):
             if not guild:
                 return
             channel = guild.get_channel(state.last_np_channel_id) if state.last_np_channel_id else None
-            if not isinstance(channel, discord.TextChannel):
+            if not channel or not hasattr(channel, "fetch_message"):
                 return
             user_member = guild.get_member(payload.user_id)
             if not user_member or not state.voice or not user_member.voice or user_member.voice.channel != state.voice.channel:
@@ -562,7 +559,7 @@ class MusicBot(commands.Bot):
         except Exception:
             log.exception("Reaction handler error")
 
-    async def _handle_reaction(self, guild_id: int, emoji: str, channel) -> None:  # type: ignore:
+    async def _handle_reaction(self, guild_id: int, emoji: str, channel) -> None:  # type: ignore
         state = self.get_state(guild_id)
         async with state.lock:
             if emoji == "⏯":  # pause/resume
@@ -595,7 +592,7 @@ class MusicBot(commands.Bot):
                 await self._seek_to(guild_id, 0, channel)
         await self._post_or_update_np(guild_id, channel, force_new=False)
 
-    async def _seek_to(self, guild_id: int, seconds: int, channel) -> None:  # type: ignore:
+    async def _seek_to(self, guild_id: int, seconds: int, channel) -> None:  # type: ignore
         state = self.get_state(guild_id)
         if not state.now_playing or not state.voice:
             return
@@ -616,7 +613,7 @@ class MusicBot(commands.Bot):
             log.exception(f"[{guild_id}] seek failed")
         await self._post_or_update_np(guild_id, channel, force_new=False)
 
-    async def _restart_with_new_volume(self, guild_id: int, channel) -> None:  # type: ignore:
+    async def _restart_with_new_volume(self, guild_id: int, channel) -> None:  # type: ignore
         state = self.get_state(guild_id)
         if not (state.voice and state.now_playing):
             return
@@ -631,7 +628,11 @@ class MusicBot(commands.Bot):
 
     # ---------- Command Registration ----------
     def _register_commands(self) -> None:
-        @self.tree.command(name="play", description="Play a YouTube/SoundCloud/HTTP URL or search query.", guilds=DECORATOR_GUILDS)
+        @self.tree.command(
+            name="play",
+            description="Play a YouTube/SoundCloud/HTTP URL or search query.",
+            guilds=DECORATOR_GUILDS,
+        )
         @app_commands.describe(query_or_url="YouTube URL or search terms")
         async def play(interaction: discord.Interaction, query_or_url: str) -> None:
             await interaction.response.defer(thinking=True)
@@ -639,15 +640,28 @@ class MusicBot(commands.Bot):
                 await interaction.followup.send("This command can only be used in a server.", ephemeral=True)
                 return
             state = self.get_state(interaction.guild.id)
-            voice = await self.ensure_voice(interaction)
+            await self.ensure_voice(interaction)
 
             tracks = await self.resolve_query(query_or_url, requester_id=interaction.user.id)
             if not tracks:
                 await interaction.followup.send("No results found.", ephemeral=True)
                 return
 
-            # If search terms, use first result; if playlist URL, enqueue first item only by default
             chosen = tracks[0]
+
+            # Choose a channel to post NP updates
+            channel = interaction.channel
+            if channel is None and interaction.guild:
+                channel = interaction.guild.system_channel
+            if channel is None and interaction.guild:
+                for ch in interaction.guild.text_channels:
+                    if ch.permissions_for(interaction.guild.me).send_messages:
+                        channel = ch
+                        break
+            if channel is None:
+                await interaction.followup.send("Cannot determine a channel for updates (need permission to send messages).", ephemeral=True)
+                return
+
             async with state.lock:
                 state.queue.append(chosen)
                 msg = f"Enqueued **{chosen.title}** (`{self._fmt_time(chosen.duration or 0)}`) from {chosen.source}."
@@ -656,18 +670,6 @@ class MusicBot(commands.Bot):
             # Start player if idle
             async with state.lock:
                 if not state.player_task or state.player_task.done():
-                    channel = interaction.channel
-if channel is None:
-    channel = interaction.guild.system_channel if interaction.guild else None
-if channel is None and interaction.guild:
-    # pick the first text channel we can send to
-    for ch in interaction.guild.text_channels:
-        if ch.permissions_for(interaction.guild.me).send_messages:
-            channel = ch
-            break
-if channel is None:
-    await interaction.followup.send("Cannot determine a channel for updates (need permission to send messages).", ephemeral=True)
-    return
                     state.player_task = asyncio.create_task(self.player_loop(interaction.guild.id, channel))
 
         @self.tree.command(name="pause", description="Pause playback.", guilds=DECORATOR_GUILDS)
@@ -797,6 +799,11 @@ if channel is None:
                 await interaction.response.send_message("Cannot determine text channel to update.", ephemeral=True)
 
         @self.tree.command(name="loop", description="Set loop mode: off, track, queue.", guilds=DECORATOR_GUILDS)
+        @app_commands.choices(mode=[
+            app_commands.Choice(name="off", value="off"),
+            app_commands.Choice(name="track", value="track"),
+            app_commands.Choice(name="queue", value="queue"),
+        ])
         @app_commands.describe(mode="off | track | queue")
         async def loop_cmd(interaction: discord.Interaction, mode: app_commands.Choice[str]) -> None:
             await self.check_same_channel(interaction)
@@ -812,11 +819,6 @@ if channel is None:
                 await interaction.response.send_message("Invalid mode. Use off|track|queue.", ephemeral=True)
                 return
             await interaction.response.send_message(f"🔁 Loop set to **{state.loop_mode.name}**.")
-
-        @loop_cmd.autocomplete  # type: ignore
-        async def loop_autocomplete(interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:  # type: ignore
-            choices = ["off", "track", "queue"]
-            return [app_commands.Choice(name=c, value=c) for c in choices if c.startswith(current.lower())]
 
         # ---- Extras ----
         @self.tree.command(name="remove_dupes", description="Remove duplicate URLs from the queue.", guilds=DECORATOR_GUILDS)
@@ -849,9 +851,7 @@ if channel is None:
                 state.queue.insert(0, chosen)
                 if state.voice and (state.voice.is_playing() or state.voice.is_paused()):
                     state.voice.stop()
-            await interaction.response.send_message(f"Jumped to **{chosen.title}**.")  # type: ignore
-
-        # Volume choices for autocomplete/nice UX
+            await interaction.response.send_message(f"Jumped to **{chosen.title}**.")
 
     # ---------- Error handling ----------
     async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
@@ -867,6 +867,7 @@ if channel is None:
             pass
         log.exception(f"Command error: {error}")
 
+
 def _parse_timestamp(ts: str) -> int:
     parts = [int(p) for p in ts.split(":")]
     if len(parts) == 2:
@@ -876,6 +877,7 @@ def _parse_timestamp(ts: str) -> int:
         h, m, s = parts
         return h * 3600 + m * 60 + s
     return -1
+
 
 # ---- Graceful shutdown in Docker ----
 bot: MusicBot
