@@ -150,7 +150,6 @@ class MusicBot(commands.Bot):
             intents=intents,
             application_id=None,
         )
-        self.tree = app_commands.CommandTree(self)
         self.guild_states: Dict[int, GuildState] = {}
 
         # Debounce map for NP embed edits: guild_id -> last_edit_ts
