@@ -388,46 +388,25 @@ class MusicBot(commands.Bot):
             return False
 
         try:
-            # Use Opus if possible (Discord prefers Opus)
+            # Build source without filter; control gain via PCMVolumeTransformer
             src = discord.FFmpegPCMAudio(
                 source=track.stream_url,
                 before_options=" ".join(FFMPEG_BASE_OPTS),
                 options="-vn",
             )
             src = discord.PCMVolumeTransformer(src, volume=state.volume / 100.0)
-            setattr(src, "_start_ts", time.monotonic())
-            # Annotate start time
+            # Progress tracking
             setattr(src, "_start_ts", time.monotonic())
 
-            # Stop existing first
+            # Stop existing first, then play
             if state.voice.is_playing() or state.voice.is_paused():
                 state.voice.stop()
-
-            state.stop_event.clear()
-            await asyncio.sleep(0.2)
-            if state.voice.is_playing() or state.voice.is_paused():
-            state.voice.stop()
             state.stop_event.clear()
             state.voice.play(src, after=lambda e: state.stop_event.set())
-            log.info(f"[{guild_id}] Now playing: {track.title} ({track.url})")
-
-            # Send/update NP embed (and set reactions once)
-            await self._post_or_update_np(guild_id, channel, force_new=False)
-
-            # Start a progress updater task
-            if state.progress_task:
-                state.progress_task.cancel()
-            state.progress_task = asyncio.create_task(self._progress_updater(guild_id, channel))
             return True
         except Exception as e:
-            log.exception(f"[{guild_id}] Failed to start FFmpeg/Opus: {e}")
-            try:
-                if hasattr(channel, "send"):
-                    await channel.send(f"⚠️ Failed to start audio for **{track.title}**. Trying the next track.")
-            except Exception:
-                pass
+            log.exception(f"[{}] play failed: {e}".format(guild_id))
             return False
-
     async def _wait_playback_finish(self, guild_id: int) -> None:
         state = self.get_state(guild_id)
         # Wait until source stops
@@ -623,28 +602,22 @@ class MusicBot(commands.Bot):
         state = self.get_state(guild_id)
         if not state.now_playing or not state.voice:
             return
-        # Restart FFmpeg with -ss seconds
         track = state.now_playing
-        vol = state.volume
+        vol = state.volume / 100.0
         try:
             src = discord.FFmpegPCMAudio(
-            source=track.stream_url,
-            before_options=" ".join(FFMPEG_BASE_OPTS + ["-ss", str(max(0, seconds))]),
-            options="-vn",
-        )
-        src = discord.PCMVolumeTransformer(src, volume=vol/100.0)
-        setattr(src, "_start_ts", time.monotonic() - seconds)
-)]),
-                options=" ".join(["-filter:a", f"volume={vol/100:.2f}"]),
+                source=track.stream_url,
+                before_options=" ".join(FFMPEG_BASE_OPTS + ["-ss", str(max(0, seconds))]
+                options="-vn",
             )
+            src = discord.PCMVolumeTransformer(src, volume=vol)
             setattr(src, "_start_ts", time.monotonic() - seconds)
             state.voice.stop()
-        state.stop_event.clear()
-        state.voice.play(src, after=lambda e: state.stop_event.set())
+            state.stop_event.clear()
+            state.voice.play(src, after=lambda e: state.stop_event.set())
         except Exception:
             log.exception(f"[{guild_id}] seek failed")
         await self._post_or_update_np(guild_id, channel, force_new=False)
-
     async def _restart_with_new_volume(self, guild_id: int, channel) -> None:  # type: ignore
         state = self.get_state(guild_id)
         if state and state.voice and isinstance(state.voice.source, discord.PCMVolumeTransformer):
