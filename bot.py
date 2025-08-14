@@ -318,7 +318,7 @@ class MusicBot(commands.Bot):
 
     # ---------- Playback ----------
 
-    async def player_loop(self, guild_id: int, channel: discord.TextChannel) -> None:
+    async def player_loop(self, guild_id: int, channel) -> None  # type: ignore:
         """Playback loop per guild; runs inside a task."""
         state = self.get_state(guild_id)
         log.info(f"[{guild_id}] Player loop started")
@@ -380,7 +380,7 @@ class MusicBot(commands.Bot):
                 state.player_task = None
             log.info(f"[{guild_id}] Player loop ended")
 
-    async def _play_track(self, guild_id: int, channel: discord.TextChannel) -> bool:
+    async def _play_track(self, guild_id: int, channel) -> bool  # type: ignore:
         state = self.get_state(guild_id)
         track = state.now_playing
         if not track:
@@ -438,7 +438,7 @@ class MusicBot(commands.Bot):
             except asyncio.TimeoutError:
                 continue
 
-    async def _post_or_update_np(self, guild_id: int, channel: discord.TextChannel, force_new: bool) -> None:
+    async def _post_or_update_np(self, guild_id: int, channel, force_new: bool) -> None  # type: ignore:
         state = self.get_state(guild_id)
         embed = self.build_now_playing_embed(guild_id)
         if not embed:
@@ -465,7 +465,7 @@ class MusicBot(commands.Bot):
             except discord.Forbidden:
                 pass  # Missing perms
 
-    async def _progress_updater(self, guild_id: int, channel: discord.TextChannel) -> None:
+    async def _progress_updater(self, guild_id: int, channel) -> None  # type: ignore:
         try:
             while True:
                 await asyncio.sleep(1.0)
@@ -562,7 +562,7 @@ class MusicBot(commands.Bot):
         except Exception:
             log.exception("Reaction handler error")
 
-    async def _handle_reaction(self, guild_id: int, emoji: str, channel: discord.TextChannel) -> None:
+    async def _handle_reaction(self, guild_id: int, emoji: str, channel) -> None  # type: ignore:
         state = self.get_state(guild_id)
         async with state.lock:
             if emoji == "⏯":  # pause/resume
@@ -595,7 +595,7 @@ class MusicBot(commands.Bot):
                 await self._seek_to(guild_id, 0, channel)
         await self._post_or_update_np(guild_id, channel, force_new=False)
 
-    async def _seek_to(self, guild_id: int, seconds: int, channel: discord.TextChannel) -> None:
+    async def _seek_to(self, guild_id: int, seconds: int, channel) -> None  # type: ignore:
         state = self.get_state(guild_id)
         if not state.now_playing or not state.voice:
             return
@@ -616,7 +616,7 @@ class MusicBot(commands.Bot):
             log.exception(f"[{guild_id}] seek failed")
         await self._post_or_update_np(guild_id, channel, force_new=False)
 
-    async def _restart_with_new_volume(self, guild_id: int, channel: discord.TextChannel) -> None:
+    async def _restart_with_new_volume(self, guild_id: int, channel) -> None  # type: ignore:
         state = self.get_state(guild_id)
         if not (state.voice and state.now_playing):
             return
@@ -656,10 +656,19 @@ class MusicBot(commands.Bot):
             # Start player if idle
             async with state.lock:
                 if not state.player_task or state.player_task.done():
-                    if not isinstance(interaction.channel, discord.TextChannel):
-                        await interaction.followup.send("Cannot determine text channel to post updates.", ephemeral=True)
-                        return
-                    state.player_task = asyncio.create_task(self.player_loop(interaction.guild.id, interaction.channel))
+                    channel = interaction.channel
+if channel is None:
+    channel = interaction.guild.system_channel if interaction.guild else None
+if channel is None and interaction.guild:
+    # pick the first text channel we can send to
+    for ch in interaction.guild.text_channels:
+        if ch.permissions_for(interaction.guild.me).send_messages:
+            channel = ch
+            break
+if channel is None:
+    await interaction.followup.send("Cannot determine a channel for updates (need permission to send messages).", ephemeral=True)
+    return
+                    state.player_task = asyncio.create_task(self.player_loop(interaction.guild.id, channel))
 
         @self.tree.command(name="pause", description="Pause playback.", guilds=DECORATOR_GUILDS)
         async def pause(interaction: discord.Interaction) -> None:
@@ -725,7 +734,7 @@ class MusicBot(commands.Bot):
             await self.check_same_channel(interaction)
             state = self.get_state(interaction.guild.id)  # type: ignore
             state.volume = percent
-            if isinstance(interaction.channel, discord.TextChannel):
+            if interaction.channel:
                 await self._restart_with_new_volume(interaction.guild.id, interaction.channel)  # type: ignore
             await interaction.response.send_message(f"🔊 Volume set to **{percent}%**.")
 
@@ -781,7 +790,7 @@ class MusicBot(commands.Bot):
             if secs < 0 or (state.now_playing.duration and secs > state.now_playing.duration):
                 await interaction.response.send_message("Seek target out of range.", ephemeral=True)
                 return
-            if isinstance(interaction.channel, discord.TextChannel):
+            if interaction.channel:
                 await self._seek_to(interaction.guild.id, secs, interaction.channel)  # type: ignore
                 await interaction.response.send_message(f"⏩ Sought to `{timestamp}`.")
             else:
