@@ -562,7 +562,7 @@ class MusicBot(commands.Bot):
         except Exception:
             log.exception("Reaction handler error")
 
-    async def _handle_reaction(self, guild_id: int, emoji: str, channel) -> None  # type: ignore:
+    async def _handle_reaction(self, guild_id: int, emoji: str, channel) -> None:  # type: ignore:
         state = self.get_state(guild_id)
         async with state.lock:
             if emoji == "⏯":  # pause/resume
@@ -595,7 +595,7 @@ class MusicBot(commands.Bot):
                 await self._seek_to(guild_id, 0, channel)
         await self._post_or_update_np(guild_id, channel, force_new=False)
 
-    async def _seek_to(self, guild_id: int, seconds: int, channel) -> None  # type: ignore:
+    async def _seek_to(self, guild_id: int, seconds: int, channel) -> None:  # type: ignore:
         state = self.get_state(guild_id)
         if not state.now_playing or not state.voice:
             return
@@ -616,7 +616,7 @@ class MusicBot(commands.Bot):
             log.exception(f"[{guild_id}] seek failed")
         await self._post_or_update_np(guild_id, channel, force_new=False)
 
-    async def _restart_with_new_volume(self, guild_id: int, channel) -> None  # type: ignore:
+    async def _restart_with_new_volume(self, guild_id: int, channel) -> None:  # type: ignore:
         state = self.get_state(guild_id)
         if not (state.voice and state.now_playing):
             return
