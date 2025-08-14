@@ -465,7 +465,7 @@ class MusicBot(commands.Bot):
             except discord.Forbidden:
                 pass  # Missing perms
 
-    async def _progress_updater(self, guild_id: int, channel) -> None  # type: ignore:
+    async def _progress_updater(self, guild_id: int, channel) -> None:  # type: ignore
         try:
             while True:
                 await asyncio.sleep(1.0)
