@@ -398,9 +398,14 @@ class MusicBot(commands.Bot):
 
         try:
             # Use Opus if possible (Discord prefers Opus)
-            src = discord.FFmpegOpusAudio(
+            src = discord.FFmpegPCMAudio(
                 source=track.stream_url,
                 before_options=" ".join(FFMPEG_BASE_OPTS),
+                options="-vn",
+            )
+            src = discord.PCMVolumeTransformer(src, volume=state.volume / 100.0)
+            setattr(src, "_start_ts", time.monotonic())
+,
                 options=" ".join(["-filter:a", f"volume={state.volume/100:.2f}"]),
             )
             # Annotate start time
@@ -412,6 +417,9 @@ class MusicBot(commands.Bot):
 
             state.stop_event.clear()
             await asyncio.sleep(0.2)
+            if state.voice.is_playing() or state.voice.is_paused():
+            state.voice.stop()
+            state.stop_event.clear()
             state.voice.play(src, after=lambda e: state.stop_event.set())
             log.info(f"[{guild_id}] Now playing: {track.title} ({track.url})")
 
@@ -492,7 +500,6 @@ class MusicBot(commands.Bot):
             if state.progress_task:
                 state.progress_task.cancel()
                 state.progress_task = None
-
     # ---------- Command Checks ----------
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         # Basic per-command logging
@@ -632,27 +639,36 @@ class MusicBot(commands.Bot):
         track = state.now_playing
         vol = state.volume
         try:
-            src = discord.FFmpegOpusAudio(
-                source=track.stream_url,
-                before_options=" ".join(FFMPEG_BASE_OPTS + ["-ss", str(max(0, seconds))]),
+            src = discord.FFmpegPCMAudio(
+            source=track.stream_url,
+            before_options=" ".join(FFMPEG_BASE_OPTS + ["-ss", str(max(0, seconds))]),
+            options="-vn",
+        )
+        src = discord.PCMVolumeTransformer(src, volume=vol/100.0)
+        setattr(src, "_start_ts", time.monotonic() - seconds)
+)]),
                 options=" ".join(["-filter:a", f"volume={vol/100:.2f}"]),
             )
             setattr(src, "_start_ts", time.monotonic() - seconds)
             state.voice.stop()
-            state.stop_event.clear()
-            state.voice.play(src, after=lambda e: state.stop_event.set())
+        state.stop_event.clear()
+        state.voice.play(src, after=lambda e: state.stop_event.set())
         except Exception:
             log.exception(f"[{guild_id}] seek failed")
         await self._post_or_update_np(guild_id, channel, force_new=False)
 
     async def _restart_with_new_volume(self, guild_id: int, channel) -> None:  # type: ignore
         state = self.get_state(guild_id)
+        if state and state.voice and isinstance(state.voice.source, discord.PCMVolumeTransformer):
+            state.voice.source.volume = state.volume / 100.0
+            if channel is not None:
+                await self._post_or_update_np(guild_id, channel, force_new=False)
+            return
+        # Fallback: restart from current position if we don't have a transformer yet
         if not (state.voice and state.now_playing):
             return
-        # Restart source to apply new volume
         pos = self._current_position_seconds(state)
         await self._seek_to(guild_id, max(0, pos), channel)
-
     # ---------- Tasks ----------
     @tasks.loop(minutes=2.0)
     async def healthbeat(self) -> None:
