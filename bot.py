@@ -380,7 +380,7 @@ class MusicBot(commands.Bot):
                 state.player_task = None
             log.info(f"[{guild_id}] Player loop ended")
 
-    async def _play_track(self, guild_id: int, channel) -> bool  # type: ignore:
+    async def _play_track(self, guild_id: int, channel) -> bool:  # type: ignore
         state = self.get_state(guild_id)
         track = state.now_playing
         if not track:
