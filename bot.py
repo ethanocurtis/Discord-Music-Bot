@@ -438,7 +438,7 @@ class MusicBot(commands.Bot):
             except asyncio.TimeoutError:
                 continue
 
-    async def _post_or_update_np(self, guild_id: int, channel, force_new: bool) -> None  # type: ignore:
+    async def _post_or_update_np(self, guild_id: int, channel, force_new: bool) -> None:  # type: ignore
         state = self.get_state(guild_id)
         embed = self.build_now_playing_embed(guild_id)
         if not embed:
