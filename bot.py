@@ -77,16 +77,6 @@ class GuildState:
     volume: int = 80  # percent
     loop: LoopMode = "off"
 
-class MusicBot(commands.Bot):
-    def __init__(self):
-        intents = discord.Intents.default()
-        intents.message_content = False  # not needed for slash commands
-        super().__init__(command_prefix="!", intents=intents, application_id=None)
-        self.tree = app_commands.CommandTree(self)
-        self._states: dict[int, GuildState] = {}
-        self.activity = discord.Game(name="/play music")
-        self.remove_command("help")
-
     # ---- Utilities ----
     def state(self, guild_id: int) -> GuildState:
         st = self._states.get(guild_id)
