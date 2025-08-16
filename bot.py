@@ -1,3 +1,4 @@
+from __future__ import annotations
 import os, asyncio, logging, typing as T
 from dataclasses import dataclass, field
 import discord
@@ -76,6 +77,16 @@ class GuildState:
     idle_since: float = 0.0
     volume: int = 80  # percent
     loop: LoopMode = "off"
+
+class MusicBot(commands.Bot):
+    def __init__(self):
+        intents = discord.Intents.default()
+        intents.message_content = False  # not needed for slash commands
+        super().__init__(command_prefix="!", intents=intents, application_id=None)
+        # NOTE: commands.Bot already has `self.tree`; do NOT replace it.
+        self._states: dict[int, GuildState] = {}
+        self.activity = discord.Game(name="/play music")
+        self.remove_command("help")
 
     # ---- Utilities ----
     def state(self, guild_id: int) -> GuildState:
@@ -403,7 +414,8 @@ async def queue_cmd(interaction: discord.Interaction):
     for i, t in enumerate(items[:20], start=1):
         d = f" ({t.duration//60}:{t.duration%60:02d})" if t.duration else ""
         lines.append(f"**{i}.** [{t.title}]({t.url}){d}")
-    desc = "\n".join(lines) if lines else "_Queue is empty._"
+    desc = "
+".join(lines) if lines else "_Queue is empty._"
     embed = discord.Embed(title="Queue", description=desc, color=discord.Color.blue())
     await interaction.response.send_message(embed=embed)
 
