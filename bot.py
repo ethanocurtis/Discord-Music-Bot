@@ -5,10 +5,6 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-
-VOLUME_STEP = 10      # % change per tap
-VOLUME_MIN = 0
-VOLUME_MAX = 150
 # ---- Optional dependency guard for yt_dlp and PyNaCl ----
 try:
     import yt_dlp
@@ -81,7 +77,6 @@ class GuildState:
     idle_since: float = 0.0
     volume: int = 80  # percent
     loop: LoopMode = "off"
-    controls_msg_id: T.Optional[int] = None
 
 class MusicBot(commands.Bot):
     def __init__(self):
@@ -264,113 +259,6 @@ class MusicBot(commands.Bot):
 
 bot = MusicBot()
 
-@bot.event
-async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
-    # ignore the bot's own reactions
-    if bot.user and payload.user_id == bot.user.id:
-        return
-    if not payload.guild_id:
-        return
-
-    guild = bot.get_guild(payload.guild_id)
-    if not guild:
-        return
-    st = bot.state(guild.id)
-
-    # only respond to the latest /nowplaying control message
-    if not st.controls_msg_id or payload.message_id != st.controls_msg_id:
-        return
-
-    # channel + message objects
-    channel = guild.get_channel(payload.channel_id)
-    if channel is None:
-        return
-
-    # (optional) remove the user's reaction so the "button" is re-pressable
-    try:
-        message = await channel.fetch_message(payload.message_id)
-        member = guild.get_member(payload.user_id)
-        if member:
-            await message.remove_reaction(payload.emoji, member)
-    except Exception:
-        pass
-
-    emoji = str(payload.emoji)
-
-    # helpers
-    async def _refresh_volume_in_embed():
-        try:
-            msg = await channel.fetch_message(payload.message_id)
-            if not msg.embeds:
-                return
-            e = msg.embeds[0]
-            # update/add Volume field
-            fields = [(f.name, f.value, f.inline) for f in e.fields]
-            e.clear_fields()
-            replaced = False
-            for (n, v, inline) in fields:
-                if n == "Volume":
-                    e.add_field(name="Volume", value=f"{st.volume}%", inline=True)
-                    replaced = True
-                else:
-                    e.add_field(name=n, value=v, inline=inline)
-            if not replaced:
-                e.add_field(name="Volume", value=f"{st.volume}%", inline=True)
-            # also keep loop footer in sync
-            e.set_footer(text=f"Loop: {st.loop}")
-            await msg.edit(embed=e)
-        except Exception:
-            pass
-
-    try:
-        # ⏭️ Skip
-        if emoji == "⏭️":
-            if st.voice and st.voice.is_connected() and (st.voice.is_playing() or st.voice.is_paused()):
-                st.voice.stop()
-
-        # ⏯️ Toggle pause / resume
-        elif emoji == "⏯️":
-            if st.voice and st.voice.is_connected():
-                if st.voice.is_playing():
-                    st.voice.pause()
-                elif st.voice.is_paused():
-                    st.voice.resume()
-
-        # ⏹️ Stop and clear queue
-        elif emoji == "⏹️":
-            if st.voice and (st.voice.is_playing() or st.voice.is_paused()):
-                st.voice.stop()
-            # clear queue
-            try:
-                while True:
-                    st.queue.get_nowait()
-                    st.queue.task_done()
-            except asyncio.QueueEmpty:
-                pass
-            st.now_playing = None
-
-        # 🔁 Cycle loop: off -> one -> all -> off
-        elif emoji == "🔁":
-            st.loop = {"off": "one", "one": "all", "all": "off"}[st.loop]
-
-        # 🔉 Volume down
-        elif emoji == "🔉":
-            st.volume = max(VOLUME_MIN, st.volume - VOLUME_STEP)
-            # restart current audio to apply new volume (ffmpeg transformer is static)
-            if st.voice and (st.voice.is_playing() or st.voice.is_paused()) and st.now_playing:
-                st.voice.stop()
-
-        # 🔊 Volume up
-        elif emoji == "🔊":
-            st.volume = min(VOLUME_MAX, st.volume + VOLUME_STEP)
-            if st.voice and (st.voice.is_playing() or st.voice.is_paused()) and st.now_playing:
-                st.voice.stop()
-
-        # reflect any changes in the embed (volume/loop)
-        await _refresh_volume_in_embed()
-
-    except Exception:
-        log.exception("Reaction control failed: %s", emoji)
 # ---- Slash Commands ----
 
 @bot.tree.command(name="join", description="Join your voice channel.")
@@ -490,12 +378,10 @@ async def stop(interaction: discord.Interaction):
 async def nowplaying(interaction: discord.Interaction):
     if not interaction.guild:
         return await interaction.response.send_message("Server only.", ephemeral=True)
-
     st = bot.state(interaction.guild.id)
     t = st.now_playing
     if not t:
         return await interaction.response.send_message("Nothing is playing right now.", ephemeral=True)
-
     embed = discord.Embed(title="Now Playing", description=f"[{t.title}]({t.url})", color=discord.Color.green())
     if t.duration:
         embed.add_field(name="Duration", value=f"{t.duration//60}:{t.duration%60:02d}")
@@ -504,21 +390,7 @@ async def nowplaying(interaction: discord.Interaction):
     if t.thumbnail:
         embed.set_thumbnail(url=t.thumbnail)
     embed.add_field(name="Volume", value=f"{st.volume}%", inline=True)
-    embed.set_footer(text=f"Loop: {st.loop}")
-
-    # send non-ephemeral so it can hold reactions
     await interaction.response.send_message(embed=embed)
-    msg = await interaction.original_response()
-
-    # remember this message as the control surface for this guild
-    st.controls_msg_id = msg.id
-
-    # add reaction controls (order is just a suggestion)
-    for emoji in ("⏯️", "⏭️", "⏹️", "🔁", "🔉", "🔊"):
-        try:
-            await msg.add_reaction(emoji)
-        except Exception:
-            pass
 
 @bot.tree.command(name="queue", description="Show up to the next 20 songs in the queue.")
 async def queue_cmd(interaction: discord.Interaction):
