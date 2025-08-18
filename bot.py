@@ -1,36 +1,37 @@
 from __future__ import annotations
 import os, asyncio, logging, typing as T
 from dataclasses import dataclass, field
+
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-
-VOLUME_STEP = 10      # % change per tap
-VOLUME_MIN = 0
-VOLUME_MAX = 150
-# ---- Optional dependency guard for yt_dlp and PyNaCl ----
+if not discord.opus.is_loaded():
+    # On Debian/Ubuntu, the shared object is libopus.so.0
+    discord.opus.load_opus("libopus.so.0")
+# ---------- Dependencies (must be installed in your image/env) ----------
 try:
-    import yt_dlp
+    import yt_dlp  # stream extraction
 except Exception as e:
-    raise SystemExit("yt-dlp is required. Add it to requirements and rebuild. Error: %r" % (e,))
+    raise SystemExit("yt-dlp is required. Install it and rebuild. Error: %r" % (e,))
 
 try:
-    import nacl  # noqa: F401
+    import nacl  # noqa: F401  # voice support (PyNaCl)
 except Exception as e:
-    # discord.py prints helpful message if PyNaCl missing, but we stop early
-    raise SystemExit("PyNaCl is required for voice. Add 'PyNaCl' to requirements. Error: %r" % (e,))
+    raise SystemExit("PyNaCl is required for voice. Install 'PyNaCl'. Error: %r" % (e,))
 
-# ---- Logging ----
+# ---------- Logging ----------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("music-bot")
 
+# ---------- Config via env ----------
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
-if not DISCORD_TOKEN:
-    log.warning("DISCORD_TOKEN env var is not set. The bot will not be able to log in.")
+YTDLP_COOKIEFILE = os.getenv("YT_COOKIE_FILE")  # Optional cookiefile for age/region-locked content
+IDLE_DISCONNECT_SECONDS = int(os.getenv("IDLE_DISCONNECT_SECONDS", "300"))  # 5 minutes
+MAX_PLAYLIST_ITEMS = int(os.getenv("MAX_PLAYLIST_ITEMS", "100"))
+DEFAULT_VOLUME = int(os.getenv("DEFAULT_VOLUME", "80"))  # percent
 
-# ---- yt-dlp configs ----
-YTDLP_COOKIEFILE = os.getenv("YT_COOKIE_FILE")  # optional: mount a cookies.txt for age/region-locked videos
+# ---------- yt-dlp ----------
 YTDLP_OPTS_BASE: dict = {
     "format": "bestaudio/best",
     "quiet": True,
@@ -43,9 +44,9 @@ YTDLP_OPTS_BASE: dict = {
 }
 if YTDLP_COOKIEFILE:
     YTDLP_OPTS_BASE["cookiefile"] = YTDLP_COOKIEFILE
-
 YTDLP_OPTS_SEARCH = {**YTDLP_OPTS_BASE, "noplaylist": True}
 
+# ---------- FFmpeg ----------
 FFMPEG_BEFORE = [
     "-reconnect", "1",
     "-reconnect_streamed", "1",
@@ -54,16 +55,14 @@ FFMPEG_BEFORE = [
 ]
 FFMPEG_OPTIONS = "-vn"
 
-IDLE_DISCONNECT_SECONDS = int(os.getenv("IDLE_DISCONNECT_SECONDS", "300"))  # 5 min default
-MAX_PLAYLIST_ITEMS = int(os.getenv("MAX_PLAYLIST_ITEMS", "100"))
-
 LoopMode = T.Literal["off", "one", "all"]
 
+# ---------- Data classes ----------
 @dataclass
 class Track:
     title: str
-    url: str              # webpage URL (for display)
-    stream_url: str       # direct audio URL for ffmpeg
+    url: str                # webpage URL for embeds
+    stream_url: str         # direct stream URL for ffmpeg
     duration: T.Optional[int] = None
     uploader: T.Optional[str] = None
     requester_id: int = 0
@@ -79,18 +78,19 @@ class GuildState:
     player_task: T.Optional[asyncio.Task] = None
     stop_event: asyncio.Event = field(default_factory=asyncio.Event)
     idle_since: float = 0.0
-    volume: int = 80  # percent
+    volume: int = DEFAULT_VOLUME
     loop: LoopMode = "off"
-    controls_msg_id: T.Optional[int] = None
 
+# ---------- Bot ----------
 class MusicBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = False  # not needed for slash commands
-        super().__init__(command_prefix="!", intents=intents, application_id=None)
-        # Bot already has self.tree; don't overwrite.
+        super().__init__(command_prefix="!", intents=intents)
+        # commands.Bot already exposes `self.tree` for slash commands; don't overwrite it.
         self._states: dict[int, GuildState] = {}
         self.activity = discord.Game(name="/play music")
+        # Optional: remove legacy prefix help to keep things tidy
         self.remove_command("help")
 
     # ---- Utilities ----
@@ -115,6 +115,7 @@ class MusicBot(commands.Bot):
         if not interaction.user.voice or not interaction.user.voice.channel:
             await interaction.response.send_message("You must be connected to a voice channel.", ephemeral=True)
             return None
+
         channel = interaction.user.voice.channel
         st = self.state(interaction.guild.id)
 
@@ -123,7 +124,6 @@ class MusicBot(commands.Bot):
                 await st.voice.move_to(channel)
         else:
             st.voice = await channel.connect(self_deaf=True, reconnect=True)
-
         return st.voice
 
     async def extract_tracks(self, query: str, requester_id: int) -> list[Track]:
@@ -134,13 +134,8 @@ class MusicBot(commands.Bot):
                 info = ydl.extract_info(query, download=False)
             if not info:
                 return []
-            entries: list[dict] = []
             if "entries" in info:
-                for e in info["entries"] or []:
-                    if e:
-                        entries.append(e)
-                # Respect MAX_PLAYLIST_ITEMS to avoid huge queues
-                entries = entries[:MAX_PLAYLIST_ITEMS]
+                entries = [e for e in info["entries"] or [] if e][:MAX_PLAYLIST_ITEMS]
             else:
                 entries = [info]
 
@@ -158,18 +153,15 @@ class MusicBot(commands.Bot):
                     thumbnail=e.get("thumbnail"),
                 ))
             return tracks
-
         return await loop.run_in_executor(None, _extract)
 
     async def play_track(self, st: GuildState) -> bool:
-        """Create FFmpeg source and start playback. Return True if started."""
         if not st.voice or not st.voice.is_connected() or not st.now_playing:
             return False
         try:
             before = " ".join(FFMPEG_BEFORE)
             src = discord.FFmpegPCMAudio(st.now_playing.stream_url, before_options=before, options=FFMPEG_OPTIONS)
             pcm = discord.PCMVolumeTransformer(src, volume=st.volume / 100.0)
-            # Stop previous audio if any
             if st.voice.is_playing() or st.voice.is_paused():
                 st.voice.stop()
             st.stop_event.clear()
@@ -184,7 +176,7 @@ class MusicBot(commands.Bot):
         log.info("[%s] Player loop started", guild_id)
         try:
             while True:
-                # Disconnect if idle too long with empty queue and nothing playing
+                # Disconnect after idle period
                 if st.queue.empty() and (not st.voice or not st.voice.is_connected() or not st.voice.is_playing()):
                     if st.idle_since == 0:
                         st.idle_since = asyncio.get_event_loop().time()
@@ -197,17 +189,15 @@ class MusicBot(commands.Bot):
                 else:
                     st.idle_since = 0
 
-                # If something is playing or paused, wait until it ends
+                # If playing/paused, just wait
                 if st.voice and (st.voice.is_playing() or st.voice.is_paused()):
                     await asyncio.sleep(1)
                     continue
 
-                # Pull next track
+                # Loop behavior
                 if st.now_playing and st.loop == "one":
-                    # replay the same track
-                    pass
+                    pass  # replay same
                 elif st.now_playing and st.loop == "all":
-                    # requeue the finished track at the end
                     await st.queue.put(st.now_playing)
                     st.now_playing = None
 
@@ -218,10 +208,8 @@ class MusicBot(commands.Bot):
                         await asyncio.sleep(1)
                         continue
 
-                # Start playing
                 started = await self.play_track(st)
                 if not started:
-                    # Drop the problematic track and continue
                     bad = st.now_playing
                     st.now_playing = None
                     if bad:
@@ -229,11 +217,9 @@ class MusicBot(commands.Bot):
                     await asyncio.sleep(1)
                     continue
 
-                # Wait for completion
                 try:
                     await asyncio.wait_for(st.stop_event.wait(), timeout=None)
                 except asyncio.CancelledError:
-                    # External stop
                     if st.voice:
                         st.voice.stop()
                     raise
@@ -255,7 +241,6 @@ class MusicBot(commands.Bot):
 
     # ---- Discord lifecycle ----
     async def setup_hook(self):
-        # Sync commands globally
         await self.tree.sync()
         log.info("Slash commands synced.")
 
@@ -264,115 +249,7 @@ class MusicBot(commands.Bot):
 
 bot = MusicBot()
 
-@bot.event
-async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
-    # ignore the bot's own reactions
-    if bot.user and payload.user_id == bot.user.id:
-        return
-    if not payload.guild_id:
-        return
-
-    guild = bot.get_guild(payload.guild_id)
-    if not guild:
-        return
-    st = bot.state(guild.id)
-
-    # only respond to the latest /nowplaying control message
-    if not st.controls_msg_id or payload.message_id != st.controls_msg_id:
-        return
-
-    # channel + message objects
-    channel = guild.get_channel(payload.channel_id)
-    if channel is None:
-        return
-
-    # (optional) remove the user's reaction so the "button" is re-pressable
-    try:
-        message = await channel.fetch_message(payload.message_id)
-        member = guild.get_member(payload.user_id)
-        if member:
-            await message.remove_reaction(payload.emoji, member)
-    except Exception:
-        pass
-
-    emoji = str(payload.emoji)
-
-    # helpers
-    async def _refresh_volume_in_embed():
-        try:
-            msg = await channel.fetch_message(payload.message_id)
-            if not msg.embeds:
-                return
-            e = msg.embeds[0]
-            # update/add Volume field
-            fields = [(f.name, f.value, f.inline) for f in e.fields]
-            e.clear_fields()
-            replaced = False
-            for (n, v, inline) in fields:
-                if n == "Volume":
-                    e.add_field(name="Volume", value=f"{st.volume}%", inline=True)
-                    replaced = True
-                else:
-                    e.add_field(name=n, value=v, inline=inline)
-            if not replaced:
-                e.add_field(name="Volume", value=f"{st.volume}%", inline=True)
-            # also keep loop footer in sync
-            e.set_footer(text=f"Loop: {st.loop}")
-            await msg.edit(embed=e)
-        except Exception:
-            pass
-
-    try:
-        # ⏭️ Skip
-        if emoji == "⏭️":
-            if st.voice and st.voice.is_connected() and (st.voice.is_playing() or st.voice.is_paused()):
-                st.voice.stop()
-
-        # ⏯️ Toggle pause / resume
-        elif emoji == "⏯️":
-            if st.voice and st.voice.is_connected():
-                if st.voice.is_playing():
-                    st.voice.pause()
-                elif st.voice.is_paused():
-                    st.voice.resume()
-
-        # ⏹️ Stop and clear queue
-        elif emoji == "⏹️":
-            if st.voice and (st.voice.is_playing() or st.voice.is_paused()):
-                st.voice.stop()
-            # clear queue
-            try:
-                while True:
-                    st.queue.get_nowait()
-                    st.queue.task_done()
-            except asyncio.QueueEmpty:
-                pass
-            st.now_playing = None
-
-        # 🔁 Cycle loop: off -> one -> all -> off
-        elif emoji == "🔁":
-            st.loop = {"off": "one", "one": "all", "all": "off"}[st.loop]
-
-        # 🔉 Volume down
-        elif emoji == "🔉":
-            st.volume = max(VOLUME_MIN, st.volume - VOLUME_STEP)
-            # restart current audio to apply new volume (ffmpeg transformer is static)
-            if st.voice and (st.voice.is_playing() or st.voice.is_paused()) and st.now_playing:
-                st.voice.stop()
-
-        # 🔊 Volume up
-        elif emoji == "🔊":
-            st.volume = min(VOLUME_MAX, st.volume + VOLUME_STEP)
-            if st.voice and (st.voice.is_playing() or st.voice.is_paused()) and st.now_playing:
-                st.voice.stop()
-
-        # reflect any changes in the embed (volume/loop)
-        await _refresh_volume_in_embed()
-
-    except Exception:
-        log.exception("Reaction control failed: %s", emoji)
-# ---- Slash Commands ----
-
+# ---------- Slash Commands ----------
 @bot.tree.command(name="join", description="Join your voice channel.")
 async def join(interaction: discord.Interaction):
     voice = await bot.ensure_connected(interaction)
@@ -384,7 +261,6 @@ async def leave(interaction: discord.Interaction):
     if not interaction.guild:
         return await interaction.response.send_message("Server only.", ephemeral=True)
     st = bot.state(interaction.guild.id)
-    # cancel player
     if st.player_task and not st.player_task.done():
         st.player_task.cancel()
     # clear queue
@@ -420,7 +296,6 @@ async def play(interaction: discord.Interaction, query: str):
     if not tracks:
         return await interaction.followup.send("❌ Nothing found for that query.")
 
-    # Enqueue tracks
     for t in tracks:
         await st.queue.put(t)
 
@@ -490,12 +365,10 @@ async def stop(interaction: discord.Interaction):
 async def nowplaying(interaction: discord.Interaction):
     if not interaction.guild:
         return await interaction.response.send_message("Server only.", ephemeral=True)
-
     st = bot.state(interaction.guild.id)
     t = st.now_playing
     if not t:
         return await interaction.response.send_message("Nothing is playing right now.", ephemeral=True)
-
     embed = discord.Embed(title="Now Playing", description=f"[{t.title}]({t.url})", color=discord.Color.green())
     if t.duration:
         embed.add_field(name="Duration", value=f"{t.duration//60}:{t.duration%60:02d}")
@@ -504,21 +377,7 @@ async def nowplaying(interaction: discord.Interaction):
     if t.thumbnail:
         embed.set_thumbnail(url=t.thumbnail)
     embed.add_field(name="Volume", value=f"{st.volume}%", inline=True)
-    embed.set_footer(text=f"Loop: {st.loop}")
-
-    # send non-ephemeral so it can hold reactions
     await interaction.response.send_message(embed=embed)
-    msg = await interaction.original_response()
-
-    # remember this message as the control surface for this guild
-    st.controls_msg_id = msg.id
-
-    # add reaction controls (order is just a suggestion)
-    for emoji in ("⏯️", "⏭️", "⏹️", "🔁", "🔉", "🔊"):
-        try:
-            await msg.add_reaction(emoji)
-        except Exception:
-            pass
 
 @bot.tree.command(name="queue", description="Show up to the next 20 songs in the queue.")
 async def queue_cmd(interaction: discord.Interaction):
@@ -526,8 +385,7 @@ async def queue_cmd(interaction: discord.Interaction):
         return await interaction.response.send_message("Server only.", ephemeral=True)
     st = bot.state(interaction.guild.id)
 
-    items: list[Track] = []
-    # Peek into the queue without removing: drain to temp then put back
+    # Peek queue (drain to temp then put back)
     temp: list[Track] = []
     try:
         while True and len(temp) < 50:
@@ -560,7 +418,6 @@ async def remove(interaction: discord.Interaction, position: app_commands.Range[
     except asyncio.QueueEmpty:
         pass
     if position > len(temp):
-        # put back
         for x in temp:
             st.queue.put_nowait(x)
         return await interaction.response.send_message("Invalid position.", ephemeral=True)
@@ -593,9 +450,8 @@ async def volume(interaction: discord.Interaction, percent: app_commands.Range[i
         return await interaction.response.send_message("Server only.", ephemeral=True)
     st = bot.state(interaction.guild.id)
     st.volume = int(percent)
-    # If currently playing, restart transformer at new volume
+    # If playing, restart current transformer by stopping; loop will restart
     if st.voice and (st.voice.is_playing() or st.voice.is_paused()) and st.now_playing:
-        # restart current track at new volume without losing position (ffmpeg can't change volume live)
         st.voice.stop()
     await interaction.response.send_message(f"🔊 Volume set to **{st.volume}%**.")
 
@@ -613,9 +469,9 @@ async def loop_cmd(interaction: discord.Interaction, mode: app_commands.Choice[s
     st.loop = mode.value  # type: ignore
     await interaction.response.send_message(f"🔁 Loop set to **{st.loop}**.")
 
-# ---- Entrypoint ----
+# ---------- Entrypoint ----------
 if __name__ == "__main__":
-    if DISCORD_TOKEN:
-        bot.run(DISCORD_TOKEN)
+    if not DISCORD_TOKEN:
+        log.error("DISCORD_TOKEN not set. Put it in your environment or .env file.")
     else:
-        log.error("DISCORD_TOKEN not set. Set it and rerun.")
+        bot.run(DISCORD_TOKEN)
