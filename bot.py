@@ -101,25 +101,54 @@ class MusicBot(commands.Bot):
         return query.startswith(("http://", "https://"))
 
     async def ensure_connected(self, interaction: discord.Interaction) -> T.Optional[discord.VoiceClient]:
-        if not interaction.guild:
-            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
-            return None
-        if interaction.user is None or not isinstance(interaction.user, discord.Member):
-            await interaction.response.send_message("Could not resolve your voice state.", ephemeral=True)
-            return None
-        if not interaction.user.voice or not interaction.user.voice.channel:
-            await interaction.response.send_message("You must be connected to a voice channel.", ephemeral=True)
-            return None
-        channel = interaction.user.voice.channel
-        st = self.state(interaction.guild.id)
+    # --- sanity checks / user must be in a voice channel ---
+    if not interaction.guild:
+        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+        return None
+    if interaction.user is None or not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message("Could not resolve your voice state.", ephemeral=True)
+        return None
+    if not interaction.user.voice or not interaction.user.voice.channel:
+        await interaction.response.send_message("You must be connected to a voice channel.", ephemeral=True)
+        return None
 
-        if st.voice and st.voice.is_connected():
-            if st.voice.channel != channel:
-                await st.voice.move_to(channel)
-        else:
-            st.voice = await channel.connect(self_deaf=True, reconnect=True)
+    st = self.state(interaction.guild.id)
+    target = interaction.user.voice.channel  # where we want to be
 
+    # --- if we're already connected to the right channel and link is healthy, reuse it ---
+    if st.voice and st.voice.is_connected() and st.voice.channel == target:
         return st.voice
+
+    # --- if connected to a different channel, try moving; if that fails, hard reconnect ---
+    if st.voice and st.voice.is_connected() and st.voice.channel != target:
+        try:
+            await st.voice.move_to(target)
+            return st.voice
+        except Exception:
+            # fall through to hard reconnect
+            pass
+
+    # --- hard reconnect path (fixes invalid/stale sessions like 4006) ---
+    try:
+        if st.voice and st.voice.is_connected():
+            await st.voice.disconnect(force=False)
+    except Exception:
+        pass
+    finally:
+        st.voice = None
+
+    try:
+        st.voice = await target.connect(self_deaf=True, reconnect=True)
+    except discord.ClientException as e:
+        # e.g. "Already connected to a voice channel." -> clean up and try once more
+        try:
+            if st.voice and st.voice.is_connected():
+                await st.voice.disconnect(force=False)
+        except Exception:
+            pass
+        st.voice = await target.connect(self_deaf=True, reconnect=True)
+
+    return st.voice
 
     async def extract_tracks(self, query: str, requester_id: int) -> list[Track]:
         loop = asyncio.get_event_loop()
