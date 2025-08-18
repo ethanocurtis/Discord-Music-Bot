@@ -414,8 +414,7 @@ async def queue_cmd(interaction: discord.Interaction):
     for i, t in enumerate(items[:20], start=1):
         d = f" ({t.duration//60}:{t.duration%60:02d})" if t.duration else ""
         lines.append(f"**{i}.** [{t.title}]({t.url}){d}")
-    desc = "
-".join(lines) if lines else "_Queue is empty._"
+    desc = "\n".join(lines) if lines else "_Queue is empty._"
     embed = discord.Embed(title="Queue", description=desc, color=discord.Color.blue())
     await interaction.response.send_message(embed=embed)
 
