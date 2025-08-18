@@ -6,6 +6,9 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+if not discord.opus.is_loaded():
+    # On Debian/Ubuntu, the shared object is libopus.so.0
+    discord.opus.load_opus("libopus.so.0")
 # ---------- Dependencies (must be installed in your image/env) ----------
 try:
     import yt_dlp  # stream extraction
